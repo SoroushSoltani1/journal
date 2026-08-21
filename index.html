@@ -342,7 +342,7 @@ body { margin:0; padding:0; background:#1B1F2A; }
   // This app's own Supabase project, same one for every visitor. The anon key is meant to be public,
   // it's the row-level security policies on the dayline_data table that actually protect each user's data.
   const SUPABASE_URL = 'https://ctxofahnuoqomqiezspl.supabase.co';
-  const SUPABASE_ANON_KEY = 'sb_publishable_PdX5OGorfikr2-BJOb_F0Q_mlJR07_a';
+  const SUPABASE_ANON_KEY = 'PASTE_YOUR_ANON_KEY_HERE';
 
   const LOCAL_STORAGE_KEY = 'dayline-data-v1';
 
@@ -450,7 +450,27 @@ body { margin:0; padding:0; background:#1B1F2A; }
   // Calls whichever provider the person has connected, directly from the browser with their own key.
   // No server involved: Anthropic requires the anthropic-dangerous-direct-browser-access header for this,
   // OpenAI allows direct browser calls with just the normal Authorization header.
+  // Calls Dayline's own Edge Function, which holds the real Gemini key privately on Supabase's
+  // servers and only responds to requests from someone with a valid, logged-in session. This is
+  // why no one needs to bring their own key anymore, signing in is the whole setup.
   async function callAI({ system, messages, maxTokens }){
+    if (!state.session || !state.session.access_token) { const e = new Error('NOT_SIGNED_IN'); throw e; }
+    const res = await fetch(`${SUPABASE_URL}/functions/v1/ai-proxy`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + state.session.access_token
+      },
+      body: JSON.stringify({ system, messages, maxTokens })
+    });
+    if (!res.ok) { const e = new Error('API_ERROR'); throw e; }
+    const data = await res.json();
+    return (data.text || '').trim();
+  }
+
+  // Left in place, unused for now, in case direct bring-your-own-key support for Claude/GPT/Gemini
+  // comes back later. Not called anywhere currently.
+  async function callAI_BYOK_legacy({ system, messages, maxTokens }){
     const provider = state.aiProvider;
     const key = provider ? state.apiKeys[provider] : null;
     if (!provider || !key) { const e = new Error('NO_KEY'); throw e; }
@@ -529,7 +549,7 @@ ${goalContext ? `\nThe user also tracks these daily goals. Use this as extra con
     try {
       raw = await callAI({ system, messages: [{ role: "user", content: text }], maxTokens: 1000 });
     } catch(e) {
-      if (e.message === 'NO_KEY') throw e; // let the caller prompt the person to connect a provider
+      if (e.message === 'NOT_SIGNED_IN') throw e; // shouldn't normally happen, session likely expired
       return { skipped: true }; // network/API failure, fall back gracefully
     }
     const clean = raw.replace(/```json|```/g, '').trim();
@@ -680,10 +700,6 @@ ${goalContext ? `\nThe user also tracks these daily goals. Use this as extra con
           <textarea id="q-redlines" rows="2" placeholder="e.g. Doom scrolling all day, skipping meals, overthinking small decisions"></textarea>
         </div>
 
-        <div class="history-title" style="margin-top:24px;">Connect Gemini</div>
-        ${geminiKeyFieldHTML('onboard')}
-        <div class="q-hint" style="margin-bottom:16px;">You can skip this and add it later in the Profile tab, but rating days won't work until it's connected.</div>
-
         <button class="btn" id="onboard-submit">Start journaling →</button>
         <div id="onboard-error"></div>
       </div>
@@ -696,7 +712,6 @@ ${goalContext ? `\nThe user also tracks these daily goals. Use this as extra con
       const values = document.getElementById('q-values').value.trim();
       const redlines = document.getElementById('q-redlines').value.trim();
       state.profile = { goals, values, redlines };
-      state.apiKeys.gemini = readGeminiKeyField('onboard');
       await saveData();
       state.view = 'today';
       render();
@@ -921,8 +936,8 @@ ${goalContext ? `\nThe user also tracks these daily goals. Use this as extra con
       state.draft = null;
       await saveData();
     } catch(e) {
-      state.errorMsg = (e.message === 'NO_KEY')
-        ? "Connect a Claude or GPT API key in the Profile tab first, that's how ratings get generated."
+      state.errorMsg = (e.message === 'NOT_SIGNED_IN')
+        ? "Your sign-in expired, refresh the page and sign back in."
         : "Couldn't rate this day. Try again in a moment.";
     }
     state.loadingRate = false;
@@ -946,8 +961,8 @@ ${goalContext ? `\nThe user also tracks these daily goals. Use this as extra con
       state.chatMessages.push({ role: 'assistant', content: reply, ts: Date.now() });
       await saveData();
     } catch(e) {
-      state.chatError = (e.message === 'NO_KEY')
-        ? "Connect a Claude or GPT API key in the Profile tab first."
+      state.chatError = (e.message === 'NOT_SIGNED_IN')
+        ? "Your sign-in expired, refresh the page and sign back in."
         : "Couldn't reach the coach just now, try again in a moment.";
     }
     state.chatLoading = false;
@@ -982,8 +997,8 @@ ${goalContext ? `\nThe user also tracks these daily goals. Use this as extra con
       await saveData();
       setTimeout(() => { state.profileUpdatedFlag = false; }, 3000);
     } catch(e) {
-      state.chatError = (e.message === 'NO_KEY')
-        ? "Connect a Claude or GPT API key in the Profile tab first."
+      state.chatError = (e.message === 'NOT_SIGNED_IN')
+        ? "Your sign-in expired, refresh the page and sign back in."
         : "Couldn't update your profile from this chat, try again in a moment.";
     }
     state.chatLoading = false;
@@ -1125,16 +1140,6 @@ ${goalContext ? `\nThe user also tracks these daily goals. Use this as extra con
     if (exportBtn) exportBtn.addEventListener('click', exportData);
     const signOutBtn = document.getElementById('sign-out-btn');
     if (signOutBtn) signOutBtn.addEventListener('click', signOutOfGoogle);
-    const settingsSaveBtn = document.getElementById('settings-save');
-    if (settingsSaveBtn) {
-      settingsSaveBtn.addEventListener('click', async () => {
-        state.apiKeys.gemini = readGeminiKeyField('settings');
-        state.settingsSaved = true;
-        await saveData();
-        render();
-        setTimeout(() => { state.settingsSaved = false; }, 2500);
-      });
-    }
     const profileSaveBtn = document.getElementById('profile-save');
     if (profileSaveBtn) {
       profileSaveBtn.addEventListener('click', async () => {
@@ -1536,10 +1541,7 @@ ${goalContext ? `\nThe user also tracks these daily goals. Use this as extra con
 
       <div class="today-title serif" style="margin-bottom:6px; font-size:19px;">AI connection</div>
       <div class="profile-card">
-        ${geminiKeyFieldHTML('settings')}
-        <button class="btn" id="settings-save">Save connection</button>
-        ${state.settingsSaved ? `<span class="save-confirm">saved ✓</span>` : ''}
-        ${!state.apiKeys.gemini ? `<div class="q-hint" style="margin-top:10px; margin-bottom:0;">No key connected yet, ratings and the Coach chat won't work until you add one and save.</div>` : ''}
+        <div class="q-hint" style="margin:0;">Powered by Gemini, connected automatically through your sign-in, nothing to set up.</div>
       </div>
 
       ${state.aiProfile ? `
